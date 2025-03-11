@@ -1,2 +1,4 @@
 distribuidos\documentconverter\interfaces\IdocumentService.class
+distribuidos\documentconverters\Inserts.class
 distribuidos\documentconverters\DocumentConverterS.class
+distribuidos\documentconverters\DBConnection.class
