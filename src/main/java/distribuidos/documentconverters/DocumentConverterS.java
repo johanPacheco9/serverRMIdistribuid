@@ -10,6 +10,7 @@ import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -18,6 +19,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class DocumentConverterS extends UnicastRemoteObject implements IdocumentService {
 
@@ -25,7 +28,7 @@ public class DocumentConverterS extends UnicastRemoteObject implements Idocument
     private static final Logger logger = Logger.getLogger(DocumentConverterS.class.getName());
     private final ExecutorService executor;
 
-    // Constructor que exporta el objeto remoto
+    
     public DocumentConverterS() throws RemoteException {
         super();
         nodes = new ArrayList<>();
@@ -47,76 +50,89 @@ public class DocumentConverterS extends UnicastRemoteObject implements Idocument
         }
     }
     
+    
     @Override
-    public List<byte[]> distributeConversion(List<Document> documents) throws RemoteException {
-        System.out.println("📥 Servidor RMI: Recibiendo " + documents.size() + " documentos.");
-        logger.info("Iniciando distribución de documentos en paralelo.");
+public List<byte[]> distributeConversion(List<Document> documents) throws RemoteException {
+    System.out.println("📥 Servidor RMI: Recibiendo " + documents.size() + " documentos.");
+    logger.info("Iniciando distribución de documentos en paralelo.");
 
-        List<IdocumentService> availableNodes = getAvailableNodes();
+    List<IdocumentService> availableNodes = getAvailableNodes();
 
-        if (availableNodes.isEmpty()) {
-            String errorMsg = "No hay nodos disponibles para procesar los documentos.";
-            logger.severe(errorMsg);
-            throw new RemoteException(errorMsg);
-        }
-
-        ExecutorService executorService = Executors.newFixedThreadPool(availableNodes.size());
-        List<byte[]> resultList = Collections.synchronizedList(new ArrayList<>());
-
-        int numDocumentos = documents.size();
-        int numNodos = availableNodes.size();
-        int documentosPorNodo = (int) Math.ceil((double) numDocumentos / numNodos);
-        long userId = 1; // ID del usuario
-
-        for (int i = 0; i < numNodos; i++) {
-            int start = i * documentosPorNodo;
-            int end = Math.min(start + documentosPorNodo, numDocumentos);
-
-            if (start >= numDocumentos) break; // Evita asignar nodos sin documentos
-
-            List<Document> subList = documents.subList(start, end);
-            IdocumentService node = availableNodes.get(i);
-
-            executorService.execute(() -> {
-                try (Connection conn = new DBConnection().getConnection()) { // Abre la conexión dentro del hilo
-                    for (Document doc : subList) {
-                        try {
-                            Inserts.registrarDocumento(conn, doc.getName(), doc.getPath(), userId);
-                            logger.info("📤 Enviando documento " + doc.getName() + " al nodo " + node);
-
-                            List<byte[]> convertedFiles = node.convertToPDF(Collections.singletonList(doc));
-
-
-                            synchronized (resultList) {
-                                resultList.addAll(convertedFiles);
-                            }
-
-                        } catch (Exception ex) {
-                            logger.log(Level.SEVERE, "❌ Error procesando documento: " + doc.getName(), ex);
-                        }
-                    }
-                } catch (SQLException ex) {
-                    logger.log(Level.SEVERE, "❌ Error en la base de datos: ", ex);
-                }
-            });
-        }
-
-        executorService.shutdown();
-        try {
-            executorService.awaitTermination(10, TimeUnit.MINUTES);
-        } catch (InterruptedException e) {
-            logger.log(Level.SEVERE, "⚠️ Error esperando la terminación del pool de hilos.", e);
-        }
-        System.out.println("📤 Enviando respuesta con " + resultList.size() + " archivos PDF.");
-        
-        return resultList;
+    if (availableNodes.isEmpty()) {
+        String errorMsg = "No hay nodos disponibles para procesar los documentos.";
+        logger.severe(errorMsg);
+        throw new RemoteException(errorMsg);
     }
+
+    ExecutorService executorService = Executors.newFixedThreadPool(availableNodes.size());
+    List<byte[]> resultList = Collections.synchronizedList(new ArrayList<>());
+
+    int numDocumentos = documents.size();
+    int numNodos = availableNodes.size();
+    int documentosPorNodo = (int) Math.ceil((double) numDocumentos / numNodos);
+    long userId = 1; // ID del usuario
+
+    for (int i = 0; i < numNodos; i++) {
+        int start = i * documentosPorNodo;
+        int end = Math.min(start + documentosPorNodo, numDocumentos);
+        
+        if (start >= numDocumentos) break; 
+
+        List<Document> subList = documents.subList(start, end);
+        IdocumentService node = availableNodes.get(i);
+        String ipNodo = getNodeIp(node);
+        logger.info("ip del nodo:"+ ipNodo);
+        int nodeId = i + 1;
+
+        executorService.execute(() -> {
+            try (Connection conn = new DBConnection().getConnection()) { 
+                for (Document doc : subList) {
+                    Inserts.insertarNodoSiNoExiste(conn,ipNodo, "Activo");
+
+                    try {
+                        int documentId = Inserts.registrarDocumento(conn, doc.getName(), doc.getPath(), userId);
+                        logger.info("📤 Enviando documento " + doc.getName() + " al nodo " + node);
+
+                        int conversionId = Inserts.registrarConversion(conn, userId, nodeId, documentId);
+                        
+                        long startTime = System.currentTimeMillis();
+                        List<byte[]> convertedFiles = node.convertToPDF(Collections.singletonList(doc));
+                        long elapsedTime = System.currentTimeMillis() - startTime;
+
+                        Inserts.actualizarLote(conn, conversionId, elapsedTime);
+
+                        synchronized (resultList) {
+                            resultList.addAll(convertedFiles);
+                        }
+
+                    } catch (Exception ex) {
+                        logger.log(Level.SEVERE, "❌ Error procesando documento: " + doc.getName(), ex);
+                    }
+                }
+            } catch (SQLException ex) {
+                logger.log(Level.SEVERE, "❌ Error en la base de datos: ", ex);
+            }
+        });
+    }
+
+    executorService.shutdown();
+    try {
+        executorService.awaitTermination(10, TimeUnit.MINUTES);
+    } catch (InterruptedException e) {
+        logger.log(Level.SEVERE, "⚠️ Error esperando la terminación del pool de hilos.", e);
+    }
+
+    System.out.println("📤 Enviando respuesta con " + resultList.size() + " archivos PDF.");
+    return resultList;
+}
+
 
     public void registerNodes() throws RemoteException {
         try {
             String[] nodeNames = {
-                "rmi://192.168.1.8:8087/documentService", 
-                "rmi://192.168.1.6:8087/node1/documentService"
+                "rmi://192.168.1.11:8086/documentService", 
+                "rmi://192.168.1.6:8087/node1/documentService",
+                "rmi://192.168.1.11:8081/documentService",
             };
 
             for (String nodeName : nodeNames) {
@@ -162,4 +178,20 @@ public class DocumentConverterS extends UnicastRemoteObject implements Idocument
     public List<byte[]> convertToPDF(List<Document> documents) throws RemoteException {
         throw new UnsupportedOperationException("Not supported yet."); // Generated from nbfs://nbhost/SystemFileSystem/Templates/Classes/Code/GeneratedMethodBody
     }
+    
+    private String getNodeIp(IdocumentService node) {
+    try {
+        String nodeString = node.toString();
+        Pattern pattern = Pattern.compile("\\[endpoint:\\[(.*?)\\]");
+        Matcher matcher = pattern.matcher(nodeString);
+
+        if (matcher.find()) {
+            return matcher.group(1); // Devuelve solo "192.168.1.11:42841"
+        }
+    } catch (Exception e) {
+        logger.log(Level.WARNING, "No se pudo obtener la IP del nodo: " + node, e);
+    }
+    return "Desconocido";
+}
+
 }

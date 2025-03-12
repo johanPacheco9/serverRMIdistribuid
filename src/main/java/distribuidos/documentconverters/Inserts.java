@@ -42,30 +42,31 @@ public class Inserts {
         }
     }
     
-    public boolean existeNodo(Connection conn, int nodeId) throws SQLException {
-    String sql = "SELECT COUNT(*) FROM node WHERE id = ?";
+    public static boolean existeNodo(Connection conn, String name) throws SQLException {
+    String sql = "SELECT COUNT(*) FROM node WHERE nombre = ?";
     try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-        stmt.setInt(1, nodeId);
+        stmt.setString(1, name);
         ResultSet rs = stmt.executeQuery();
         if (rs.next()) {
             return rs.getInt(1) > 0;
         }
     }
     return false;
-}
+    }
 
-    
-    public void insertarNodoSiNoExiste(Connection conn, int nodeId, String nombreNodo, String estado) throws SQLException {
-    if (!existeNodo(conn, nodeId)) {
-        String sql = "INSERT INTO node (id, nombre, estado) VALUES (?, ?, ?)";
+    public static int insertarNodoSiNoExiste(Connection conn, String nombreNodo, String estado) throws SQLException {
+    if (!existeNodo(conn, nombreNodo)) {
+        String sql = "INSERT INTO node (nombre, estado) VALUES (?, ?)";
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setInt(1, nodeId);
-            stmt.setString(2, nombreNodo);
-            stmt.setString(3, estado);
-            stmt.executeUpdate();
+            stmt.setString(1, nombreNodo);
+            stmt.setString(2, estado);
+            return stmt.executeUpdate(); // Retorna el número de filas afectadas
         }
     }
-    }
+    return 0; // Retorna 0 si el nodo ya existía
+}
+
+ 
     
     public static int registrarLote(Connection connection, int nodeId, long userId, int documentId) throws SQLException {
     String sql = "INSERT INTO Conversion (nodeId, userId, documentId) VALUES (?, ?, ?)";
